@@ -10,10 +10,9 @@ import {
   limit,
   getDocs,
   onSnapshot,
-  serverTimestamp,
   type Unsubscribe,
 } from "firebase/firestore";
-import { db } from "./config";
+import { db, isFirebaseConfigured } from "./config";
 import type {
   DailyLog,
   FoodEntry,
@@ -63,11 +62,18 @@ export function calculateTotals(meals: DailyLog["meals"]): NutritionTotals {
   );
 }
 
-/**
- * Unique doc ID for a daily log: {userId}_{date}
- */
 export function getDailyLogDocId(userId: string, date: string): string {
   return `${userId}_${date}`;
+}
+
+// In-memory / localStorage listeners for offline dev mode
+const logListeners: Map<string, Set<(log: DailyLog) => void>> = new Map();
+
+function notifyLogListeners(key: string, log: DailyLog) {
+  const set = logListeners.get(key);
+  if (set) {
+    set.forEach((cb) => cb(log));
+  }
 }
 
 /**
@@ -78,6 +84,25 @@ export async function getDailyLog(
   date: string
 ): Promise<DailyLog> {
   const docId = getDailyLogDocId(userId, date);
+
+  if (!isFirebaseConfigured) {
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem(`macroshift_log_${docId}`);
+        if (raw) return JSON.parse(raw);
+      } catch {}
+    }
+    return {
+      id: docId,
+      userId,
+      date,
+      meals: { breakfast: [], lunch: [], dinner: [], snacks: [] },
+      totals: createEmptyTotals(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
   const docRef = doc(db, "daily_logs", docId);
   const snap = await getDoc(docRef);
 
@@ -85,17 +110,11 @@ export async function getDailyLog(
     return snap.data() as DailyLog;
   }
 
-  // Return a fresh log structure if none exists
   return {
     id: docId,
     userId,
     date,
-    meals: {
-      breakfast: [],
-      lunch: [],
-      dinner: [],
-      snacks: [],
-    },
+    meals: { breakfast: [], lunch: [], dinner: [], snacks: [] },
     totals: createEmptyTotals(),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -103,7 +122,7 @@ export async function getDailyLog(
 }
 
 /**
- * Subscribe to real-time daily log changes (uses local cache for offline)
+ * Subscribe to real-time daily log changes
  */
 export function subscribeToDailyLog(
   userId: string,
@@ -112,6 +131,22 @@ export function subscribeToDailyLog(
   onError?: (err: Error) => void
 ): Unsubscribe {
   const docId = getDailyLogDocId(userId, date);
+
+  if (!isFirebaseConfigured) {
+    const key = `macroshift_log_${docId}`;
+    if (!logListeners.has(key)) {
+      logListeners.set(key, new Set());
+    }
+    logListeners.get(key)!.add(onData);
+
+    // Initial read
+    getDailyLog(userId, date).then(onData);
+
+    return () => {
+      logListeners.get(key)?.delete(onData);
+    };
+  }
+
   const docRef = doc(db, "daily_logs", docId);
 
   return onSnapshot(
@@ -124,12 +159,7 @@ export function subscribeToDailyLog(
           id: docId,
           userId,
           date,
-          meals: {
-            breakfast: [],
-            lunch: [],
-            dinner: [],
-            snacks: [],
-          },
+          meals: { breakfast: [], lunch: [], dinner: [], snacks: [] },
           totals: createEmptyTotals(),
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -153,8 +183,6 @@ export async function addFoodToMeal(
   food: Omit<FoodEntry, "id" | "addedAt">
 ): Promise<DailyLog> {
   const docId = getDailyLogDocId(userId, date);
-  const docRef = doc(db, "daily_logs", docId);
-
   const currentLog = await getDailyLog(userId, date);
 
   const newEntry: FoodEntry = {
@@ -177,6 +205,16 @@ export async function addFoodToMeal(
     updatedAt: new Date().toISOString(),
   };
 
+  if (!isFirebaseConfigured) {
+    if (typeof window !== "undefined") {
+      const key = `macroshift_log_${docId}`;
+      localStorage.setItem(key, JSON.stringify(updatedLog));
+      notifyLogListeners(key, updatedLog);
+    }
+    return updatedLog;
+  }
+
+  const docRef = doc(db, "daily_logs", docId);
   await setDoc(docRef, updatedLog, { merge: true });
   return updatedLog;
 }
@@ -191,8 +229,6 @@ export async function removeFoodFromMeal(
   foodId: string
 ): Promise<DailyLog> {
   const docId = getDailyLogDocId(userId, date);
-  const docRef = doc(db, "daily_logs", docId);
-
   const currentLog = await getDailyLog(userId, date);
 
   const updatedMeals = {
@@ -209,6 +245,16 @@ export async function removeFoodFromMeal(
     updatedAt: new Date().toISOString(),
   };
 
+  if (!isFirebaseConfigured) {
+    if (typeof window !== "undefined") {
+      const key = `macroshift_log_${docId}`;
+      localStorage.setItem(key, JSON.stringify(updatedLog));
+      notifyLogListeners(key, updatedLog);
+    }
+    return updatedLog;
+  }
+
+  const docRef = doc(db, "daily_logs", docId);
   await setDoc(docRef, updatedLog, { merge: true });
   return updatedLog;
 }
@@ -220,11 +266,40 @@ export async function updateUserProfile(
   userId: string,
   data: Partial<UserProfile>
 ): Promise<void> {
+  if (!isFirebaseConfigured) {
+    if (typeof window !== "undefined") {
+      const key = `macroshift_profile_${userId}`;
+      const raw = localStorage.getItem(key);
+      const current = raw ? JSON.parse(raw) : {};
+      const updated = { ...current, ...data, updatedAt: new Date().toISOString() };
+      localStorage.setItem(key, JSON.stringify(updated));
+    }
+    return;
+  }
+
   const docRef = doc(db, "users", userId);
   await updateDoc(docRef, {
     ...data,
     updatedAt: new Date().toISOString(),
   });
+}
+
+/**
+ * Save complete user profile on onboarding
+ */
+export async function saveUserProfile(
+  userId: string,
+  profile: UserProfile
+): Promise<void> {
+  if (!isFirebaseConfigured) {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(`macroshift_profile_${userId}`, JSON.stringify(profile));
+    }
+    return;
+  }
+
+  const docRef = doc(db, "users", userId);
+  await setDoc(docRef, profile, { merge: true });
 }
 
 /**
@@ -237,8 +312,6 @@ export async function addWeightEntry(
   note?: string
 ): Promise<WeightEntry> {
   const entryId = `weight_${userId}_${date}_${Date.now()}`;
-  const docRef = doc(db, "weight_history", entryId);
-
   const entry: WeightEntry = {
     id: entryId,
     userId,
@@ -248,11 +321,21 @@ export async function addWeightEntry(
     createdAt: new Date().toISOString(),
   };
 
+  if (!isFirebaseConfigured) {
+    if (typeof window !== "undefined") {
+      const key = `macroshift_weight_${userId}`;
+      const raw = localStorage.getItem(key);
+      const list = raw ? JSON.parse(raw) : [];
+      list.unshift(entry);
+      localStorage.setItem(key, JSON.stringify(list));
+    }
+    await updateUserProfile(userId, { weight });
+    return entry;
+  }
+
+  const docRef = doc(db, "weight_history", entryId);
   await setDoc(docRef, entry);
-
-  // Also update latest weight in user profile
   await updateUserProfile(userId, { weight });
-
   return entry;
 }
 
@@ -263,6 +346,15 @@ export async function getWeightHistory(
   userId: string,
   limitCount = 30
 ): Promise<WeightEntry[]> {
+  if (!isFirebaseConfigured) {
+    if (typeof window !== "undefined") {
+      const key = `macroshift_weight_${userId}`;
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw).slice(0, limitCount) : [];
+    }
+    return [];
+  }
+
   try {
     const q = query(
       collection(db, "weight_history"),
@@ -273,7 +365,7 @@ export async function getWeightHistory(
     const snap = await getDocs(q);
     return snap.docs.map((docSnap) => docSnap.data() as WeightEntry);
   } catch (err) {
-    console.warn("Could not fetch weight history (might lack index offline):", err);
+    console.warn("Could not fetch weight history:", err);
     return [];
   }
 }

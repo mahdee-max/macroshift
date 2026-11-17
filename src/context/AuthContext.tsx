@@ -10,7 +10,7 @@ import {
 import { type User } from "firebase/auth";
 import { onAuthChange } from "@/lib/firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
-import { db } from "@/lib/firebase/config";
+import { db, isFirebaseConfigured } from "@/lib/firebase/config";
 import type { UserProfile } from "@/types";
 
 interface AuthContextType {
@@ -36,15 +36,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const unsubscribe = onAuthChange(async (firebaseUser) => {
       setUser(firebaseUser);
       if (firebaseUser) {
-        try {
-          const profileDoc = await getDoc(
-            doc(db, "users", firebaseUser.uid)
-          );
-          if (profileDoc.exists()) {
-            setUserProfile(profileDoc.data() as UserProfile);
+        if (!isFirebaseConfigured) {
+          // Read from localStorage
+          try {
+            const raw = localStorage.getItem(`macroshift_profile_${firebaseUser.uid}`);
+            if (raw) {
+              setUserProfile(JSON.parse(raw));
+            } else {
+              setUserProfile(null);
+            }
+          } catch {
+            setUserProfile(null);
           }
-        } catch (error) {
-          console.error("Error fetching user profile:", error);
+        } else {
+          // Read from live Firestore
+          try {
+            const profileDoc = await getDoc(
+              doc(db, "users", firebaseUser.uid)
+            );
+            if (profileDoc.exists()) {
+              setUserProfile(profileDoc.data() as UserProfile);
+            } else {
+              setUserProfile(null);
+            }
+          } catch (error) {
+            console.error("Error fetching user profile:", error);
+            setUserProfile(null);
+          }
         }
       } else {
         setUserProfile(null);

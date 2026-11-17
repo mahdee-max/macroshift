@@ -2,8 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { doc, setDoc } from "firebase/firestore";
-import { db } from "@/lib/firebase/config";
+import { saveUserProfile } from "@/lib/firebase/firestore";
 import { useAuth } from "@/context/AuthContext";
 import { Stepper } from "@/components/ui/Stepper";
 import { Button } from "@/components/ui/Button";
@@ -120,7 +119,7 @@ export default function OnboardingPage() {
     };
 
     try {
-      await setDoc(doc(db, "users", user.uid), profile);
+      await saveUserProfile(user.uid, profile);
       setUserProfile(profile);
       router.replace("/dashboard");
     } catch (err: unknown) {
